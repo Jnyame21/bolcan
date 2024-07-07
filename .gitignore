@@ -1,0 +1,4 @@
+build/*
+dist/*
+bolcan.egg-info/*
+__pycache__/*

@@ -27,7 +27,9 @@ def pipe_network(loops, equation:str, pipes_in_common_loops=None, K=False, error
 
     Returns
     --------
-    A list of dictionaries containing each loop's name and a list of each pipe's data together with the assumed and corrected rates.
+    Str: A message indicating that the result did not converge.
+    List: A list of dictionaries, each containing the loop's name and a list of data for each pipe, along with the assumed and corrected rates.
+    
         
     Examples
     --------
@@ -93,7 +95,7 @@ def pipe_network(loops, equation:str, pipes_in_common_loops=None, K=False, error
             }]
         
     """
-
+    results = True
     if equation not in ['darcy', 'hazen']:
         raise ValueError("The equation must either be 'hazen' for Hazen Williams or 'darcy' for Darcy Weisbach")
     
@@ -104,13 +106,14 @@ def pipe_network(loops, equation:str, pipes_in_common_loops=None, K=False, error
         header = lp['props'][0]
         data = lp['props'][1:]
         df = pd.DataFrame(data, columns=header)
+        df['Qa'] = df['Qa'].astype(float)
         
         if 'pipe' not in df.columns:
             raise ValueError("No 'pipe' column was found. Make sure you have the names of the pipes under a column named 'pipe' ")
         elif 'Qa' not in df.columns:
             raise ValueError("No 'Qa' column was found. Make sure you have the flow rates of the pipes under a column named 'Qa' ")
         
-        if not K and equation in ['darcy', 'hazen']:
+        if not K:
             if 'length' not in df.columns:
                 raise ValueError("No 'length' column was found. Make sure you have the lengths of the pipes under a column named 'length' ")
             elif 'diameter' not in df.columns:
@@ -119,21 +122,33 @@ def pipe_network(loops, equation:str, pipes_in_common_loops=None, K=False, error
                 raise ValueError("No 'f' column was found. Make sure you have the friction factor(f) of the pipes under a column named 'f' ")
             elif equation == 'hazen' and 'C' not in df.columns:
                 raise ValueError("No 'C' column was found. Make sure you have the Hazen Williams's coefficient(C) of the pipes under a column named 'C'")
+            else:
+                df['length'] = df['length'].astype(float)
+                df['diameter'] = df['diameter'].astype(float)
         else:
             if 'K' not in df.columns:
                 raise ValueError("No 'K' column was found. Make sure you have the K values of the pipes under a column named 'K' ")
+            else:
+                df['K'] = df['K'].astype(float)
         
+        if not K and equation == 'darcy':
+            df['f'] = df['f'].astype(float)
+        elif not K and equation == 'hazen':
+            df['C'] = df['C'].astype(float)
+            
         # Copy the assumed flow rate to a new column to be used for the calculation
-        df['Qnew'] = df[f'Qa']
+        df['Qnew'] = df['Qa']
         df_list.append({'name': lp['name'], 'df': df})
         
     iterations = 1
+    
     while True:
         q_list = []   
         
         # Function to calculate the head loss in each pipe
         def head_loss(a, b, c, d):
             # a=length, b=diameter, c=f/C/K, d=assumed rate
+            a=float(a); b=float(b); c=float(c); d=float(d)
             
             hl = math.pow(abs(d), n)
             if not K and equation == 'darcy':
@@ -164,7 +179,7 @@ def pipe_network(loops, equation:str, pipes_in_common_loops=None, K=False, error
             hl_sum = sum(df['df']['hl'])
             hl_Qnew_sum = sum(df['df']['hl/Qnew'])
             
-            # calculate the error, check if it's less than 0.2 and adjust the rate
+            # calculate the correction factor
             q = -hl_sum/(1.85*hl_Qnew_sum)
             q_list.append({'name': df['name'], 'q': q})
         
@@ -200,6 +215,7 @@ def pipe_network(loops, equation:str, pipes_in_common_loops=None, K=False, error
         for df_q in q_list:
             df_q_list.append(df_q['q'])
         
+        # Check if all the correction factors are less than the error tolerance
         if all(abs(item) < error for item in df_q_list):
             break
         
@@ -207,21 +223,147 @@ def pipe_network(loops, equation:str, pipes_in_common_loops=None, K=False, error
             df['df']['Qnew'] = df['df'].apply(lambda row: correct_rate(row, df, df_q['q']), axis=1)
         
         if iterations >= max_iter:
-            print("No convergence after 100 iterations. You can increase the number of iterations by modifying the 'max_iter' parameter in the function argument")
+            results = False
             break
 
         iterations +=1
     
-    for df, df_q in zip(df_list, q_list):
-        df['df']['Qnew'] = round(df['df']['Qnew'], 4)
-        df['df']['hl'] = round(df['df']['hl'], 4)
-        df['df']['hl/Qnew'] = round(df['df']['hl/Qnew'], 4)
-        df_to_list = df['df'].values.tolist()
-        df_to_list.insert(0, df['df'].columns.tolist())
-        df['df'] = df_to_list
-        df['props'] = df.pop('df')
+    if results:
+        for df, df_q in zip(df_list, q_list):
+            df['df']['Qnew'] = round(df['df']['Qnew'], 4)
+            df['df']['hl'] = round(df['df']['hl'], 4)
+            df['df']['hl/Qnew'] = round(df['df']['hl/Qnew'], 4)
+            df_to_list = df['df'].values.tolist()
+            df_to_list.insert(0, df['df'].columns.tolist())
+            df['df'] = df_to_list
+            df['props'] = df.pop('df')
 
-    return df_list
+        return df_list
+    else:
+        return f"No convergence after {max_iter} iterations. You can increase the number of iterations by modifying the 'max_iter' parameter in the function argument"
+
+
+def gas_velcity(Qb, Pb, Tb, D, T, z, P, unit:str):
+    """
+    Calculate the velocity of gas flowing through a pipeline
+    
+    Args:
+        Qb(float): The base flow rate of the gas in m3/day or ft3/day(scf/day)
+        D(float): The diameter of the pipe in mm or inches
+        Pb(float): The base pressure of the gas in kPa or psia
+        Tb(float): The base temperature of the gas in Kelvin(K) or Rankine(R)
+        T(float): The temperature of the flowing gas in Kelvin(K) or Rankine(R)
+        z(float): The gas compressibility factor, dimensionaless
+        P(float): The pressure of the gas, kPa or psia
+        
+    Returns:
+        float: The velocity of the gas in the pipeline
+    
+    Example
+    ---------
+    Qb = 250e6    # base flow rate, ft3/day (scf/day)
+    Pb = 14.7     # base pressure, psia
+    Tb = 520      # base temperature, Rankine
+    D = 19        # diameter, inches
+    T = 520       # temparature, Rankine
+    z = 1         # z factor
+    P = 1014.7      # pressure, psia
+    unit = 'uscs' # unit
+    
+    result = gas_velcity(Qb=Qb, Pb=Pb, Tb=Tb, D=D, T=T, z=z, P=P, unit='uscs')
+    print(result)
+    
+    Result
+    21.289
+    
+    """
+    if unit not in ['si', 'uscs']:
+        raise ValueError("The unit parameter must either be 'si' for SI units or 'uscs' for US customary unit")
+    
+    v = (Qb/math.pow(D, 2))*(Pb/Tb)*((T*z)/P)
+    if unit == 'uscs':
+        const_A = 0.002122
+        v = v*const_A
+    else:
+        const_A = 14.7349
+        v = v*const_A
+    
+    return round(v, 3)
+
+
+def zfactor_cnga(Pavg, G, Tf):
+    """
+    Calculate the compressiblity factor(z-factor) of a gas in a pipeline using the california natural gas association method(cnga)
+    
+    Args:
+        P(float): Average pressure, psig
+        G(float): Specific gravity, dimensionaless
+        Tf(float): The gas flowing temperature, Rankine(R)
+        
+    Returns:
+        float: The compressibility factor(z-factor) of the gas
+    
+    Example
+    ---------
+    G = 0.6
+    Tf = 520
+    Pavg = 1000
+    result = zfactor_cnga(Pavg=Pavg, G=G, Tf=Tf)
+    print(result)
+    
+    Result
+    0.858
+    
+    """
+    const_A = 1 + ((Pavg*344400*math.pow(10, 1.785*G))/math.pow(Tf, 3.825))
+    return round(1/const_A, 3)
+
+
+def reynold_number(Q, Pb, Tb, D, G, u, unit):
+    """
+    Calculate the Reynold number of gas flowing through a pipeline
+    
+    Args:
+        Q(float): Flow rate, m3/day or ft3/day(scf/day)
+        Pb(float): Base pressure, kPa or psia
+        Tb(float): Base temperature, Kelvin(K) or Rankine(R)
+        D(float): Pipe diameter, mm or inches
+        G(float): Gas specify gravity, dimensionless
+        u(float): Gas viscosity, lb/ft-s or poise
+        unit(str): Unit, si or uscs
+        
+    Returns:
+        float: The Reynold number
+    
+    Example
+    ---------
+    Q = 250e6     # flow rate, ft3/day (scf/day)
+    Pb = 14.7     # base pressure, psia
+    Tb = 520      # base temperature, Rankine
+    D = 19        # diameter, inches
+    G = 0.6       # gas gravity
+    u = 0.00008   # viscosity
+    unit = 'uscs' # unit
+    
+    result = reynold_number(Q=Q, Pb=Pb, Tb=Tb, D=D, G=G, u=u, unit='uscs')
+    print(result)
+    
+    Result
+    1332931.4
+    
+    """
+    if unit not in ['si', 'uscs']:
+        raise ValueError("The unit parameter must either be 'si' for SI units or 'uscs' for US customary unit")
+    
+    v = (Pb/Tb)*((Q*G)/(u*D))
+    if unit == 'uscs':
+        const_A = 0.0004778
+        v = v*const_A
+    else:
+        const_A = 0.5134
+        v = v*const_A
+    
+    return round(v, 1)
 
 
 
